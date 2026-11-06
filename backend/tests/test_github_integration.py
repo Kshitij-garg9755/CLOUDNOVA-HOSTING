@@ -53,6 +53,11 @@ def test_installation_callback_saves_id_and_returns_to_origin_that_started_flow(
 def test_installation_repository_listing_and_branch_selection(client,monkeypatch):
     headers=auth(client);add_installation()
     monkeypatch.setattr(settings,"github_app_id","test-app-id");monkeypatch.setattr(settings,"github_private_key","test-key")
+    status=client.get("/api/github/status",headers=headers)
+    assert status.status_code==200 and status.json()["active_installation_count"]==1
+    assert status.json()["installations"][0]["account_login"]=="cloudnova-test"
+    assert "installation_id" not in status.json()["installations"][0]
+    assert "private_key" not in status.json()
     def fake_request(self,installation_id,path,params=None):
         if path=="/installation/repositories":return {"repositories":[{"id":991,"full_name":"cloudnova-test/site","owner":{"login":"cloudnova-test"},"description":"Private app","private":True,"default_branch":"trunk"},{"id":992,"full_name":"cloudnova-test/public-site","owner":{"login":"cloudnova-test"},"description":"Public site","private":False,"default_branch":"main"}]}
         if path.endswith("/branches"):return [{"name":"trunk","protected":True},{"name":"preview","protected":False}]
@@ -85,6 +90,19 @@ def test_installation_repository_listing_and_branch_selection(client,monkeypatch
     assert saved.status_code==201 and "value" not in saved.json()
     listed=client.get(f"/api/projects/{project_id}/environment",headers=headers)
     assert listed.json()["items"]==[{"id":saved.json()["id"],"name":"BUILD_SECRET","value_set":True}]
+
+def test_repository_listing_reports_permission_failure_without_logging_credentials(client,monkeypatch,caplog):
+    import httpx
+    from app.services.github import GitHubClient
+    headers=auth(client);add_installation()
+    monkeypatch.setattr(settings,"github_app_id","test-app-id");monkeypatch.setattr(settings,"github_private_key","never-log-this-private-key")
+    response=httpx.Response(403,request=httpx.Request("GET","https://api.github.com/installation/repositories"),headers={"X-GitHub-Request-Id":"safe-request-ref"})
+    failure=httpx.HTTPStatusError("forbidden",request=response.request,response=response)
+    monkeypatch.setattr(GitHubClient,"installation_repositories",lambda self,installation_id:(_ for _ in ()).throw(failure))
+    result=client.get("/api/github/repositories",headers=headers)
+    assert result.status_code==502 and "HTTP 403" in result.json()["detail"]
+    assert "never-log-this-private-key" not in caplog.text and "Bearer" not in caplog.text
+    assert "safe-request-ref" in caplog.text
 
 def test_installation_repository_listing_fetches_all_pages(monkeypatch):
     from app.services.github import GitHubClient

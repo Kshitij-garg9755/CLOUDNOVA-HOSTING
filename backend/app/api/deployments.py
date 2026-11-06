@@ -1,9 +1,11 @@
 import hashlib,hmac,secrets
+import logging
 from datetime import datetime,timezone
 from urllib.parse import quote
 from fastapi import APIRouter,Depends,HTTPException,Request,Query
 from fastapi.responses import RedirectResponse
 from jose import jwt
+import httpx
 from pydantic import BaseModel,Field
 from sqlalchemy.orm import Session
 from app.core.config import settings,origins
@@ -14,6 +16,10 @@ from app.services.github import GitHubClient,GitHubNotConfigured
 from app.services.repository_inspector import inspect_repository,safe_root_directory
 
 router=APIRouter(prefix="/api")
+logger=logging.getLogger(__name__)
+
+def _diagnostic_ref(value:str)->str:
+    return hashlib.sha256(value.encode()).hexdigest()[:12]
 class ProjectCreate(BaseModel):repository_id:str;name:str=Field(min_length=2,max_length=100);branch:str=Field(min_length=1,max_length=120);root_directory:str=".";framework:str|None=None;build_command:str|None=None;install_command:str|None=None;start_command:str|None=None;output_directory:str|None=None;frontend_directory:str|None=None;backend_directory:str|None=None;runtime_version:str|None=None
 class ProjectUpdate(BaseModel):name:str|None=None;branch:str|None=None;root_directory:str|None=None;framework:str|None=None;build_command:str|None=None;install_command:str|None=None;start_command:str|None=None;output_directory:str|None=None;frontend_directory:str|None=None;backend_directory:str|None=None;runtime_version:str|None=None;app_port:int|None=Field(default=None,ge=1,le=65535)
 class DomainCreate(BaseModel):hostname:str=Field(min_length=4,max_length=253)
@@ -42,15 +48,26 @@ def github_callback(installation_id:str|None=None,setup_action:str|None=None,sta
         payload=jwt.decode(state or "",settings.secret_key,algorithms=["HS256"])
         user_id=payload.get("sub") if payload.get("purpose")=="github_install" else None
         frontend_origin=payload.get("frontend_origin")
-    except Exception:user_id=None;frontend_origin=None
-    if not user_id or not installation_id:raise HTTPException(400,"GitHub installation state is missing or expired")
-    if not frontend_origin or frontend_origin not in origins():raise HTTPException(400,"The frontend origin is not allowed. Restart the GitHub connection from the CloudNova website.")
+    except Exception:
+        logger.warning("github_installation_callback state=invalid")
+        user_id=None;frontend_origin=None
+    if not user_id or not installation_id:
+        logger.warning("github_installation_callback state=missing_installation_or_user")
+        raise HTTPException(400,"GitHub installation state is missing or expired")
+    if not frontend_origin or frontend_origin not in origins():
+        logger.warning("github_installation_callback user_ref=%s state=frontend_origin_not_allowed",_diagnostic_ref(user_id))
+        raise HTTPException(400,"The frontend origin is not allowed. Restart the GitHub connection from the CloudNova website.")
     u=db.get(User,user_id)
     if not u or not u.is_active:raise HTTPException(401,"Account unavailable")
     if not settings.github_app_id or not settings.github_private_key:raise HTTPException(503,"GitHub App credentials are not configured")
     try:
         result=GitHubClient().app_request(f"/app/installations/{installation_id}")
-    except Exception:raise HTTPException(502,"Could not verify GitHub installation")
+    except httpx.HTTPStatusError as exc:
+        logger.warning("github_installation_callback user_ref=%s installation_ref=%s state=github_rejected status=%d request_id=%s",_diagnostic_ref(user_id),_diagnostic_ref(installation_id),exc.response.status_code,exc.response.headers.get("X-GitHub-Request-Id","unknown"))
+        raise HTTPException(502,f"GitHub could not verify this installation (HTTP {exc.response.status_code}). Check the GitHub App ID and private key.")
+    except Exception as exc:
+        logger.warning("github_installation_callback user_ref=%s installation_ref=%s state=verification_error error_type=%s",_diagnostic_ref(user_id),_diagnostic_ref(installation_id),type(exc).__name__)
+        raise HTTPException(502,"Could not verify GitHub installation. Check the GitHub App configuration.")
     existing=db.query(GitHubInstallation).filter_by(installation_id=installation_id).first()
     if existing and existing.user_id!=u.id:raise HTTPException(409,"Installation is linked to another account")
     if not existing:
@@ -58,11 +75,32 @@ def github_callback(installation_id:str|None=None,setup_action:str|None=None,sta
     else:
         existing.account_login=result.get("account",{}).get("login",existing.account_login);existing.account_type=result.get("account",{}).get("type",existing.account_type);existing.status="active"
     db.commit()
+    logger.info("github_installation_callback user_ref=%s installation_ref=%s state=saved account_type=%s",_diagnostic_ref(user_id),_diagnostic_ref(installation_id),result.get("account",{}).get("type","unknown"))
     # Redirect to the signed-in project area; installation metadata is not placed in the URL.
     return RedirectResponse(frontend_origin+"/dashboard/projects?github=connected",status_code=303)
+
+@router.get("/github/status")
+def github_status(db:Session=Depends(get_db),u:User=Depends(current_user)):
+    installations=db.query(GitHubInstallation).filter_by(user_id=u.id).all()
+    active=[item for item in installations if item.status=="active"]
+    logger.info("github_status user_ref=%s active_installations=%d",_diagnostic_ref(u.id),len(active))
+    return {
+        "app_configured":bool(settings.github_app_id and settings.github_app_slug and settings.github_private_key_pem),
+        "callback_configured":bool(settings.github_callback_url),
+        "active_installation_count":len(active),
+        "installations":[{
+            "account_login":item.account_login,
+            "status":item.status,
+            "accessible_repository_count":db.query(GitHubRepository).filter_by(installation_id=item.id,accessible=True).count(),
+        } for item in installations],
+    }
+
 @router.get("/github/repositories")
 def github_repositories(db:Session=Depends(get_db),u:User=Depends(current_user)):
     installations=db.query(GitHubInstallation).filter_by(user_id=u.id,status="active").all();result=[]
+    logger.info("github_repository_list_started user_ref=%s active_installations=%d",_diagnostic_ref(u.id),len(installations))
+    if not installations:
+        logger.warning("github_repository_list_empty user_ref=%s reason=no_active_installation",_diagnostic_ref(u.id))
     for i in installations:
         try:
             repos=GitHubClient().installation_repositories(i.installation_id)
@@ -75,9 +113,25 @@ def github_repositories(db:Session=Depends(get_db),u:User=Depends(current_user))
                 if not row:row=GitHubRepository(installation_id=i.id,github_repo_id=str(r["id"]),full_name=r["full_name"],owner=owner,description=r.get("description"),private=r.get("private",True),default_branch=r.get("default_branch","main"),accessible=True);db.add(row)
                 else:row.full_name=r["full_name"];row.owner=owner;row.description=r.get("description");row.private=r.get("private",True);row.default_branch=r.get("default_branch","main");row.accessible=True
                 result.append(row)
-        except GitHubNotConfigured:raise HTTPException(503,"GitHub App is not configured")
-        except Exception:raise HTTPException(502,"GitHub repository listing failed. Confirm the App is installed for the selected repositories and has Metadata read access.")
-    db.commit();return {"items":[{"id":r.id,"github_repo_id":int(r.github_repo_id),"name":r.full_name.rsplit("/",1)[-1],"owner":r.owner or r.full_name.split("/",1)[0],"full_name":r.full_name,"visibility":"private" if r.private else "public","private":r.private,"description":r.description,"default_branch":r.default_branch} for r in result]}
+        except GitHubNotConfigured:
+            logger.error("github_repository_list_failed user_ref=%s installation_ref=%s reason=app_not_configured",_diagnostic_ref(u.id),_diagnostic_ref(i.installation_id))
+            raise HTTPException(503,"GitHub App is not configured on the API service.")
+        except httpx.HTTPStatusError as exc:
+            status=exc.response.status_code
+            logger.warning("github_repository_list_failed user_ref=%s installation_ref=%s status=%d request_id=%s",_diagnostic_ref(u.id),_diagnostic_ref(i.installation_id),status,exc.response.headers.get("X-GitHub-Request-Id","unknown"))
+            if status in {401,403}:
+                detail=f"GitHub denied repository access (HTTP {status}). Check the App installation selection and Metadata read permission."
+            elif status==404:
+                detail="GitHub could not find the saved installation. Reconnect the GitHub App from this CloudNova account."
+            else:
+                detail=f"GitHub repository request failed (HTTP {status}). Retry, then check the GitHub App configuration if it continues."
+            raise HTTPException(502,detail)
+        except Exception as exc:
+            logger.warning("github_repository_list_failed user_ref=%s installation_ref=%s error_type=%s",_diagnostic_ref(u.id),_diagnostic_ref(i.installation_id),type(exc).__name__)
+            raise HTTPException(502,"GitHub repository listing failed. Check the API logs using the request time; no credentials are included there.")
+    db.commit()
+    logger.info("github_repository_list_completed user_ref=%s active_installations=%d repository_count=%d",_diagnostic_ref(u.id),len(installations),len(result))
+    return {"items":[{"id":r.id,"github_repo_id":int(r.github_repo_id),"name":r.full_name.rsplit("/",1)[-1],"owner":r.owner or r.full_name.split("/",1)[0],"full_name":r.full_name,"visibility":"private" if r.private else "public","private":r.private,"description":r.description,"default_branch":r.default_branch} for r in result]}
 @router.get("/github/repositories/{repository_id}")
 def github_repository_details(repository_id:str,db:Session=Depends(get_db),u:User=Depends(current_user)):
     repo=db.get(GitHubRepository,repository_id)
