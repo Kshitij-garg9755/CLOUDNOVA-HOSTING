@@ -31,7 +31,7 @@ def deployment_dict(d):return {"id":d.id,"project_id":d.project_id,"status":d.st
 
 @router.get("/github/connect")
 def github_connect(u:User=Depends(current_user)):
-    if not settings.github_app_id or not settings.github_app_slug or not settings.github_private_key_pem:raise HTTPException(503,"GitHub App is not configured. Set GITHUB_APP_ID, GITHUB_APP_SLUG, GITHUB_PRIVATE_KEY, and GITHUB_CALLBACK_URL.")
+    if not settings.github_app_id or not settings.github_app_slug or not settings.github_private_key_pem:raise HTTPException(503,"GitHub App is not configured on the backend. Set GITHUB_APP_ID, GITHUB_APP_SLUG, GITHUB_PRIVATE_KEY, and GITHUB_CALLBACK_URL in backend/.env locally or the Render service environment, then restart the API.")
     state=jwt.encode({"sub":u.id,"purpose":"github_install","exp":datetime.now(timezone.utc).timestamp()+600,"nonce":secrets.token_urlsafe(18)},settings.secret_key,algorithm="HS256")
     return {"url":f"https://github.com/apps/{quote(settings.github_app_slug)}/installations/new?state={quote(state)}","expires_in":600}
 @router.get("/github/callback")
