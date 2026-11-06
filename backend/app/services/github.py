@@ -18,3 +18,13 @@ class GitHubClient:
         r=httpx.get(f"{API}{path}",headers={"Authorization":f"Bearer {self.app_token()}","Accept":"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"},timeout=15);r.raise_for_status();return r.json()
     def request(self,installation_id:str,path:str,params=None):
         r=httpx.get(f"{API}{path}",params=params,headers={"Authorization":f"Bearer {self.installation_token(installation_id)}","Accept":"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"},timeout=20);r.raise_for_status();return r.json()
+    def installation_repositories(self,installation_id:str)->list[dict]:
+        """Fetch all repositories currently selected for this App installation."""
+        repositories=[]
+        for page in range(1,101):
+            result=self.request(installation_id,"/installation/repositories",{"per_page":100,"page":page})
+            batch=result.get("repositories",[])
+            if not isinstance(batch,list):raise ValueError("GitHub returned an invalid repository list")
+            repositories.extend(batch)
+            if len(batch)<100:break
+        return repositories

@@ -29,7 +29,7 @@ Create a Blueprint from the repository root, or manually use those exact setting
 | `GITHUB_CLIENT_SECRET` | Existing OAuth client secret (optional for current install flow). |
 | `GITHUB_PRIVATE_KEY` | GitHub App PEM private key. Multiline PEM and literal `\\n` are both supported. |
 | `GITHUB_WEBHOOK_SECRET` | Exact GitHub App webhook signing secret. |
-| `GITHUB_CALLBACK_URL` | `https://YOUR-API-HOST/api/github/callback`. |
+| `GITHUB_CALLBACK_URL` | `https://cloudnova-api-qnzr.onrender.com/api/github/callback`; set the GitHub App Setup URL to this exact URL too. |
 | `PAYMENT_DEMO_MODE` | Keep `true` until Razorpay test configuration is verified. |
 | `RAZORPAY_KEY_ID` | Optional Razorpay key ID. |
 | `RAZORPAY_KEY_SECRET` | Optional secret. |

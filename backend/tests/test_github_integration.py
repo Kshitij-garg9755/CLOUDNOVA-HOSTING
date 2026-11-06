@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+from urllib.parse import parse_qs,urlparse
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models import User, GitHubInstallation
@@ -29,20 +30,72 @@ def test_github_app_jwt_is_signed_with_configured_pem(monkeypatch):
     token=GitHubClient().app_token();payload=jwt.decode(token,private.public_key(),algorithms=["RS256"])
     assert payload["iss"]=="12345"
 
+def test_installation_callback_saves_id_and_returns_to_origin_that_started_flow(client,monkeypatch):
+    from app.core.config import settings
+    from app.services.github import GitHubClient
+    headers=auth(client)
+    monkeypatch.setattr(settings,"github_app_id","12345");monkeypatch.setattr(settings,"github_app_slug","cloudnova-test")
+    monkeypatch.setattr(settings,"github_private_key","test-key")
+    monkeypatch.setattr(settings,"frontend_origins","http://localhost:5173,https://cloudnova-test.netlify.app")
+    connected=client.get("/api/github/connect",headers={**headers,"Origin":"https://cloudnova-test.netlify.app"})
+    state=parse_qs(urlparse(connected.json()["url"]).query)["state"][0]
+    monkeypatch.setattr(GitHubClient,"app_request",lambda self,path:{"account":{"login":"cloudnova-test","type":"Organization"}})
+    response=client.get("/api/github/callback",params={"installation_id":"7766","setup_action":"install","state":state},follow_redirects=False)
+    assert response.status_code==303
+    assert response.headers["location"]=="https://cloudnova-test.netlify.app/dashboard/projects?github=connected"
+    db=SessionLocal()
+    try:
+        row=db.query(GitHubInstallation).filter_by(installation_id="7766").one()
+        assert row.account_login=="cloudnova-test" and row.status=="active"
+    finally:db.close()
+
 def test_installation_repository_listing_and_branch_selection(client,monkeypatch):
     headers=auth(client);add_installation()
     monkeypatch.setattr(settings,"github_app_id","test-app-id");monkeypatch.setattr(settings,"github_private_key","test-key")
     def fake_request(self,installation_id,path,params=None):
-        if path=="/installation/repositories":return {"repositories":[{"id":991,"full_name":"cloudnova-test/site","private":True,"default_branch":"trunk"}]}
+        if path=="/installation/repositories":return {"repositories":[{"id":991,"full_name":"cloudnova-test/site","private":True,"default_branch":"trunk"},{"id":992,"full_name":"cloudnova-test/public-site","private":False,"default_branch":"main"}]}
         if path.endswith("/branches"):return [{"name":"trunk","protected":True},{"name":"preview","protected":False}]
         if path=="/repos/cloudnova-test/site":return {"default_branch":"trunk","private":True,"html_url":"https://github.com/cloudnova-test/site","description":"Site"}
         raise AssertionError(path)
     monkeypatch.setattr("app.api.deployments.GitHubClient.request",fake_request)
     repos=client.get("/api/github/repositories",headers=headers);assert repos.status_code==200
     repository_id=repos.json()["items"][0]["id"]
+    listed=repos.json()["items"][0]
+    assert listed["github_repo_id"]==991 and listed["name"]=="site"
+    assert listed["full_name"]=="cloudnova-test/site" and listed["default_branch"]=="trunk"
+    assert listed["private"] is True and listed["visibility"]=="private"
+    public=next(item for item in repos.json()["items"] if item["github_repo_id"]==992)
+    assert public["name"]=="public-site" and public["private"] is False and public["visibility"]=="public"
     details=client.get(f"/api/github/repositories/{repository_id}",headers=headers);assert details.json()["default_branch"]=="trunk"
     branches=client.get(f"/api/github/repositories/{repository_id}/branches",headers=headers)
     assert [b["name"] for b in branches.json()["items"]]==["trunk","preview"]
+
+def test_installation_repository_listing_fetches_all_pages(monkeypatch):
+    from app.services.github import GitHubClient
+    requested=[]
+    def fake_request(self,installation_id,path,params=None):
+        requested.append(params["page"])
+        if params["page"]==1:return {"repositories":[{"id":i,"full_name":f"org/repo-{i}"} for i in range(100)]}
+        return {"repositories":[{"id":101,"full_name":"org/repo-101"}]}
+    monkeypatch.setattr(GitHubClient,"request",fake_request)
+    repositories=GitHubClient.__new__(GitHubClient).installation_repositories("7766")
+    assert len(repositories)==101 and requested==[1,2]
+
+def test_github_repository_request_uses_server_side_installation_token(monkeypatch):
+    from app.services.github import GitHubClient
+    client=GitHubClient.__new__(GitHubClient)
+    monkeypatch.setattr(client,"installation_token",lambda installation_id:"test-installation-token")
+    captured={}
+    class Response:
+        def raise_for_status(self):pass
+        def json(self):return {"repositories":[]}
+    def fake_get(url,**kwargs):
+        captured.update(url=url,**kwargs)
+        return Response()
+    monkeypatch.setattr("app.services.github.httpx.get",fake_get)
+    assert client.request("7766","/installation/repositories",{"per_page":100})=={"repositories":[]}
+    assert captured["url"]=="https://api.github.com/installation/repositories"
+    assert captured["headers"]["Authorization"]=="Bearer test-installation-token"
 
 def test_github_webhook_signature_dedup_and_uninstall_revoke(client,monkeypatch):
     headers=auth(client);installation_row_id=add_installation();monkeypatch.setattr(settings,"github_webhook_secret","unit-test-webhook-secret")
