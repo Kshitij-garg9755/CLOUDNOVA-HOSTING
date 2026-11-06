@@ -42,5 +42,9 @@ class Settings(BaseSettings):
         return value
 
 settings = Settings()
-def origins() -> list[str]: return [x.strip().rstrip("/") for x in settings.frontend_origins.split(",") if x.strip()]
+def origins() -> list[str]:
+    values = [x.strip().rstrip("/") for x in settings.frontend_origins.split(",") if x.strip()]
+    if "*" in values:
+        raise ValueError("FRONTEND_ORIGINS must list explicit origins when CORS credentials are enabled")
+    return values
 def allowed_hosts() -> list[str]: return [x.strip() for x in settings.allowed_hosts.split(",") if x.strip()]

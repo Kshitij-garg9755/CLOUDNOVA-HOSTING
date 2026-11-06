@@ -1,3 +1,5 @@
+import pytest
+
 def register(client,email="one@example.com",password="secret-pass-123"):
     return client.post('/api/auth/register',json={"name":"Test User","email":email,"password":password})
 def token(client,email="one@example.com",password="secret-pass-123"):
@@ -18,6 +20,13 @@ def test_domain_results_marked_demo(client):
     result=client.post('/api/domains/search',json={"domain":"example.com"}).json();assert result['mode']=='DEMO'
 def test_database_health_endpoint(client):
     response=client.get('/health');assert response.status_code==200 and response.json()['database']=='ok'
+def test_cors_origins_are_explicit_when_credentials_are_enabled(monkeypatch):
+    from app.core.config import origins,settings
+    monkeypatch.setattr(settings,'frontend_origins','http://localhost:5173,https://cloudnova.example')
+    assert origins()==['http://localhost:5173','https://cloudnova.example']
+    monkeypatch.setattr(settings,'frontend_origins','*')
+    with pytest.raises(ValueError,match='explicit origins'):
+        origins()
 def test_github_disconnect_revokes_access_without_deleting_projects(client):
     from app.core.database import SessionLocal
     from app.models import User,GitHubInstallation,GitHubRepository,Project

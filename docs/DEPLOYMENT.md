@@ -18,7 +18,7 @@ Create a Blueprint from the repository root, or manually use those exact setting
 | --- | --- |
 | `DATABASE_URL` | PostgreSQL connection URL; keep secret. |
 | `SECRET_KEY` | Long random JWT signing key. The Blueprint generates one; retain it across deploys. |
-| `FRONTEND_ORIGINS` | Exact frontend origin(s), comma-separated, e.g. `https://cloudnova.netlify.app`; no path or trailing slash. |
+| `FRONTEND_ORIGINS` | Exact frontend origin(s), comma-separated, e.g. `http://localhost:5173,https://your-site.netlify.app`; no path or trailing slash. Wildcards are rejected because credentials are enabled. |
 | `ALLOWED_HOSTS` | API hostname, e.g. `cloudnova-api.onrender.com`; add custom API hostname if used. |
 | `ENVIRONMENT` | `production`. |
 | `BOOTSTRAP_ADMIN_EMAIL` | Optional initial admin email. |
@@ -55,7 +55,7 @@ The deployed service binds `0.0.0.0` and uses Render's injected `$PORT`. OpenAPI
 
 ## Netlify frontend
 
-Connect the repository with base directory `frontend`, build command `npm run build`, and publish directory `dist`. Set `VITE_API_BASE_URL=https://YOUR-RENDER-SERVICE.onrender.com/api`. The frontend temporarily supports the former `VITE_API_URL` as a fallback for existing Netlify sites; migrate the Netlify variable to `VITE_API_BASE_URL`. Add the exact Netlify origin to Render's `FRONTEND_ORIGINS`, then redeploy the API. Rebuild Netlify after changing frontend variables.
+Connect the repository with base directory `frontend`, build command `npm run build`, and publish directory `dist`. Set `VITE_API_BASE_URL=https://cloudnova-api-qnzr.onrender.com/api`. The frontend temporarily supports the former `VITE_API_URL` as a fallback for existing Netlify sites; migrate the Netlify variable to `VITE_API_BASE_URL`. Add the exact Netlify origin to Render's `FRONTEND_ORIGINS`, then redeploy the API. Rebuild Netlify after changing frontend variables. The live API was verified to allow `http://localhost:5173`; add the real production site origin when known.
 
 ## Production setup reminders
 
