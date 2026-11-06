@@ -55,7 +55,7 @@ The deployed service binds `0.0.0.0` and uses Render's injected `$PORT`. OpenAPI
 
 ## Netlify frontend
 
-Connect the repository with base directory `frontend`, build command `npm run build`, and publish directory `dist`. Set `VITE_API_BASE_URL=https://cloudnova-api-qnzr.onrender.com/api`. The frontend temporarily supports the former `VITE_API_URL` as a fallback for existing Netlify sites; migrate the Netlify variable to `VITE_API_BASE_URL`. Add the exact Netlify origin to Render's `FRONTEND_ORIGINS`, then redeploy the API. Rebuild Netlify after changing frontend variables. The live API was verified to allow `http://localhost:5173`; add the real production site origin when known.
+The root `netlify.toml` configures the monorepo site with base directory `frontend`, build command `npm run build`, publish directory `dist`, the deployed API base URL, and an SPA fallback redirect. Netlify's `netlify.toml` support for monorepos uses the configured base directory and paths relative to it. If you change the API URL or environment in Netlify's UI, set `VITE_API_BASE_URL` there and trigger a new build. The frontend temporarily supports the former `VITE_API_URL` as a fallback; migrate existing Netlify variables to `VITE_API_BASE_URL`. Add the exact deployed Netlify origin to Render's `FRONTEND_ORIGINS`, then redeploy the API. The live API was verified to allow `http://localhost:5173`; add the real production site origin when known.
 
 ## Production setup reminders
 

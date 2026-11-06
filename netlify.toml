@@ -1,6 +1,10 @@
 [build]
+  base = "frontend"
   command = "npm run build"
   publish = "dist"
+
+[build.environment]
+  VITE_API_BASE_URL = "https://cloudnova-api-qnzr.onrender.com/api"
 
 [[redirects]]
   from = "/*"
