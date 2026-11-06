@@ -10,8 +10,10 @@ Admin routes require backend role `admin`: `/api/admin/*`. Collections accept `l
 
 Domain availability returns `mode: DEMO`; provisioning is simulated. Razorpay verification checks HMAC signatures; webhook requires `X-Razorpay-Signature`. Demo verification accepts only `demo_signature` and is not a real transaction.
 
-## GitHub deployment control plane
+## GitHub import and deployment control plane
 
-`GET /api/github/connect` returns the GitHub App installation URL. After installation, authorized repositories and branches are listed from GitHub using short-lived backend installation tokens. `POST /api/projects` imports a repository and detects a framework from repository files. Project settings are editable via `PUT /api/projects/{id}`. GitHub push webhook events require `X-Hub-Signature-256` and unique `X-GitHub-Delivery` IDs. Environment variable values are encrypted at rest and never returned by list APIs.
+`GET /api/github/connect` returns the GitHub App installation URL. After installation, `GET /api/github/repositories` fetches all authorized repositories from GitHub with short-lived backend installation tokens and returns owner, name, description, visibility, default branch, GitHub ID, and CloudNova's internal ID. `GET /api/github/repositories/{id}/branches` lists branches; `GET /api/github/repositories/{id}/detect` suggests project settings from the selected branch/root. `POST /api/projects` stores the selected repository and editable build settings. Project settings are editable via `PUT /api/projects/{id}`.
 
-Deployment history, log, and cancellation endpoints are present. A deployment request returns 503 until the dedicated gVisor worker/queue is configured. Runtime controls, rollback, live routing, artifact serving, and SSL activation return unavailable until their real provider is installed. Domain verification requires a published TXT record and does not activate DNS or SSL.
+Per-project environment variable values are encrypted at rest, omitted from API responses, and managed at `/api/projects/{id}/environment`; only names and set status are returned. GitHub push webhook events require `X-Hub-Signature-256` and unique `X-GitHub-Delivery` IDs.
+
+Deployment history, log, and cancellation endpoints are present. A deployment request remains unavailable until a dedicated isolated build executor is implemented and installed. The current Celery task deliberately fails closed and does not run repository code. Build execution, artifact storage, live routing, rollback, and SSL activation are not operational. Domain verification requires a published TXT record and does not activate DNS or SSL.

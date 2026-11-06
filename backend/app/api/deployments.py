@@ -11,10 +11,10 @@ from app.core.database import get_db
 from app.models import User,GitHubInstallation,GitHubRepository,Project,Deployment,DeploymentLog,WebhookEvent,CustomDomain,EnvironmentVariable
 from app.api.routes import current_user,admin_user
 from app.services.github import GitHubClient,GitHubNotConfigured
-from app.services.frameworks import detect
+from app.services.repository_inspector import inspect_repository,safe_root_directory
 
 router=APIRouter(prefix="/api")
-class ProjectCreate(BaseModel):repository_id:str;name:str=Field(min_length=2,max_length=100);branch:str=Field(min_length=1,max_length=120);root_directory:str=".";framework:str|None=None;build_command:str|None=None;install_command:str|None=None;start_command:str|None=None;output_directory:str|None=None;frontend_directory:str|None=None;backend_directory:str|None=None
+class ProjectCreate(BaseModel):repository_id:str;name:str=Field(min_length=2,max_length=100);branch:str=Field(min_length=1,max_length=120);root_directory:str=".";framework:str|None=None;build_command:str|None=None;install_command:str|None=None;start_command:str|None=None;output_directory:str|None=None;frontend_directory:str|None=None;backend_directory:str|None=None;runtime_version:str|None=None
 class ProjectUpdate(BaseModel):name:str|None=None;branch:str|None=None;root_directory:str|None=None;framework:str|None=None;build_command:str|None=None;install_command:str|None=None;start_command:str|None=None;output_directory:str|None=None;frontend_directory:str|None=None;backend_directory:str|None=None;runtime_version:str|None=None;app_port:int|None=Field(default=None,ge=1,le=65535)
 class DomainCreate(BaseModel):hostname:str=Field(min_length=4,max_length=253)
 class EnvCreate(BaseModel):name:str=Field(pattern=r"^[A-Z_][A-Z0-9_]{0,119}$");value:str=Field(max_length=10000)
@@ -71,12 +71,13 @@ def github_repositories(db:Session=Depends(get_db),u:User=Depends(current_user))
             for r in repos:
                 if not isinstance(r,dict) or not r.get("id") or not r.get("full_name"):continue
                 row=db.query(GitHubRepository).filter_by(installation_id=i.id,github_repo_id=str(r["id"])).first()
-                if not row:row=GitHubRepository(installation_id=i.id,github_repo_id=str(r["id"]),full_name=r["full_name"],private=r.get("private",True),default_branch=r.get("default_branch","main"),accessible=True);db.add(row)
-                else:row.full_name=r["full_name"];row.private=r.get("private",True);row.default_branch=r.get("default_branch","main");row.accessible=True
+                owner=r.get("owner",{}).get("login") or r["full_name"].split("/",1)[0]
+                if not row:row=GitHubRepository(installation_id=i.id,github_repo_id=str(r["id"]),full_name=r["full_name"],owner=owner,description=r.get("description"),private=r.get("private",True),default_branch=r.get("default_branch","main"),accessible=True);db.add(row)
+                else:row.full_name=r["full_name"];row.owner=owner;row.description=r.get("description");row.private=r.get("private",True);row.default_branch=r.get("default_branch","main");row.accessible=True
                 result.append(row)
         except GitHubNotConfigured:raise HTTPException(503,"GitHub App is not configured")
         except Exception:raise HTTPException(502,"GitHub repository listing failed. Confirm the App is installed for the selected repositories and has Metadata read access.")
-    db.commit();return {"items":[{"id":r.id,"github_repo_id":int(r.github_repo_id),"name":r.full_name.rsplit("/",1)[-1],"full_name":r.full_name,"private":r.private,"visibility":"private" if r.private else "public","default_branch":r.default_branch} for r in result]}
+    db.commit();return {"items":[{"id":r.id,"github_repo_id":int(r.github_repo_id),"name":r.full_name.rsplit("/",1)[-1],"owner":r.owner or r.full_name.split("/",1)[0],"full_name":r.full_name,"visibility":"private" if r.private else "public","private":r.private,"description":r.description,"default_branch":r.default_branch} for r in result]}
 @router.get("/github/repositories/{repository_id}")
 def github_repository_details(repository_id:str,db:Session=Depends(get_db),u:User=Depends(current_user)):
     repo=db.get(GitHubRepository,repository_id)
@@ -86,7 +87,8 @@ def github_repository_details(repository_id:str,db:Session=Depends(get_db),u:Use
         r=GitHubClient().request(installation.installation_id,f"/repos/{repo.full_name}")
     except Exception:raise HTTPException(502,"GitHub repository details could not be loaded")
     repo.default_branch=r.get("default_branch",repo.default_branch);repo.private=r.get("private",repo.private);db.commit()
-    return {"id":repo.id,"github_repo_id":repo.github_repo_id,"full_name":repo.full_name,"private":repo.private,"default_branch":repo.default_branch,"html_url":r.get("html_url"),"description":r.get("description"),"installation_status":installation.status}
+    repo.owner=r.get("owner",{}).get("login") or repo.owner;repo.description=r.get("description");db.commit()
+    return {"id":repo.id,"github_repo_id":int(repo.github_repo_id),"name":repo.full_name.rsplit("/",1)[-1],"owner":repo.owner or repo.full_name.split("/",1)[0],"full_name":repo.full_name,"private":repo.private,"visibility":"private" if repo.private else "public","default_branch":repo.default_branch,"html_url":r.get("html_url"),"description":repo.description,"installation_status":installation.status}
 @router.get("/github/repositories/{repository_id}/branches")
 def github_branches(repository_id:str,db:Session=Depends(get_db),u:User=Depends(current_user)):
     repo=db.get(GitHubRepository,repository_id)
@@ -95,6 +97,17 @@ def github_branches(repository_id:str,db:Session=Depends(get_db),u:User=Depends(
     try:data=GitHubClient().request(i.installation_id,f"/repos/{repo.full_name}/branches",{"per_page":100})
     except Exception:raise HTTPException(502,"GitHub branch listing failed")
     return {"items":[{"name":b["name"],"protected":b.get("protected",False)} for b in data]}
+@router.get("/github/repositories/{repository_id}/detect")
+def github_detect(repository_id:str,branch:str|None=None,root_directory:str=".",db:Session=Depends(get_db),u:User=Depends(current_user)):
+    repo=db.get(GitHubRepository,repository_id)
+    if not repo:raise HTTPException(404,"Repository not found")
+    installation=installation_for(repo,db,u)
+    selected_branch=branch or repo.default_branch
+    try:
+        return inspect_repository(GitHubClient(),installation.installation_id,repo.full_name,selected_branch,root_directory)
+    except ValueError as exc:raise HTTPException(422,str(exc))
+    except GitHubNotConfigured:raise HTTPException(503,"GitHub App is not configured")
+    except Exception:raise HTTPException(502,"Could not detect project settings from the selected branch")
 @router.post("/github/disconnect")
 def github_disconnect(db:Session=Depends(get_db),u:User=Depends(current_user)):
     rows=db.query(GitHubInstallation).filter_by(user_id=u.id,status="active").all()
@@ -110,24 +123,15 @@ def create_project(data:ProjectCreate,db:Session=Depends(get_db),u:User=Depends(
     installation_for(repo,db,u)
     if db.query(Project).filter_by(repository_id=repo.id,name=data.name).first():raise HTTPException(409,"Project already exists for this repository")
     try:
-        root=data.root_directory.strip("./")
-        if root and (".." in root.split("/") or root.startswith("/")):raise HTTPException(422,"Root directory must be a repository relative path")
-        inst=db.get(GitHubInstallation,repo.installation_id);client=GitHubClient();contents=client.request(inst.installation_id,f"/repos/{repo.full_name}/contents/{root}" if root else f"/repos/{repo.full_name}/contents",{"ref":data.branch})
-        paths=[f["path"] for f in contents if isinstance(f,dict)]
-        pkg=next((f for f in contents if isinstance(f,dict) and f.get("name")=="package.json"),None)
-        package={}
-        if pkg:
-            import base64,json
-            pkg_path=f"{root}/package.json" if root else "package.json"
-            raw=client.request(inst.installation_id,f"/repos/{repo.full_name}/contents/{pkg_path}",{"ref":data.branch}).get("content","")
-            try:package=json.loads(base64.b64decode(raw).decode())
-            except Exception:package={}
-        detection=detect(paths,package)
+        root=safe_root_directory(data.root_directory)
+        inst=db.get(GitHubInstallation,repo.installation_id)
+        detection=inspect_repository(GitHubClient(),inst.installation_id,repo.full_name,data.branch,root)
     except GitHubNotConfigured:raise HTTPException(503,"GitHub App is not configured")
+    except ValueError as exc:raise HTTPException(422,str(exc))
     except Exception:raise HTTPException(422,"Could not inspect repository branch")
-    values={**detection,"framework":data.framework or detection.get("framework"),"install_command":data.install_command if data.install_command is not None else detection.get("install_command"),"build_command":data.build_command if data.build_command is not None else detection.get("build_command"),"start_command":data.start_command if data.start_command is not None else detection.get("start_command"),"output_directory":data.output_directory if data.output_directory is not None else detection.get("output_directory")}
+    values={**detection,"framework":data.framework or detection.get("framework"),"install_command":data.install_command if data.install_command is not None else detection.get("install_command"),"build_command":data.build_command if data.build_command is not None else detection.get("build_command"),"start_command":data.start_command if data.start_command is not None else detection.get("start_command"),"output_directory":data.output_directory if data.output_directory is not None else detection.get("output_directory"),"runtime_version":data.runtime_version or detection.get("runtime_version")}
     slug="".join(c.lower() if c.isalnum() else "-" for c in data.name).strip("-")[:70] or "project";slug=f"{slug}-{secrets.token_hex(3)}"
-    p=Project(user_id=u.id,repository_id=repo.id,name=data.name,slug=slug,branch=data.branch,root_directory=data.root_directory,frontend_directory=data.frontend_directory,backend_directory=data.backend_directory,**values);db.add(p);db.commit();db.refresh(p)
+    p=Project(user_id=u.id,repository_id=repo.id,name=data.name,slug=slug,branch=data.branch,root_directory=root or ".",frontend_directory=data.frontend_directory,backend_directory=data.backend_directory,**values);db.add(p);db.commit();db.refresh(p)
     return project_dict(p,repo)
 def project_dict(p,repo=None):return {"id":p.id,"name":p.name,"slug":p.slug,"repository_id":p.repository_id,"repository":repo.full_name if repo else None,"branch":p.branch,"framework":p.framework,"root_directory":p.root_directory,"frontend_directory":p.frontend_directory,"backend_directory":p.backend_directory,"install_command":p.install_command,"build_command":p.build_command,"start_command":p.start_command,"output_directory":p.output_directory,"runtime_version":p.runtime_version,"app_port":p.app_port,"created_at":p.created_at}
 @router.get("/projects")

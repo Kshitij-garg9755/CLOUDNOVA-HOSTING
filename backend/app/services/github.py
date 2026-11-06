@@ -21,10 +21,13 @@ class GitHubClient:
     def installation_repositories(self,installation_id:str)->list[dict]:
         """Fetch all repositories currently selected for this App installation."""
         repositories=[]
-        for page in range(1,101):
+        page=1
+        while True:
             result=self.request(installation_id,"/installation/repositories",{"per_page":100,"page":page})
             batch=result.get("repositories",[])
             if not isinstance(batch,list):raise ValueError("GitHub returned an invalid repository list")
             repositories.extend(batch)
-            if len(batch)<100:break
+            total=result.get("total_count")
+            if (isinstance(total,int) and len(repositories)>=total) or len(batch)<100:break
+            page+=1
         return repositories

@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import hmac
 import json
@@ -53,9 +54,11 @@ def test_installation_repository_listing_and_branch_selection(client,monkeypatch
     headers=auth(client);add_installation()
     monkeypatch.setattr(settings,"github_app_id","test-app-id");monkeypatch.setattr(settings,"github_private_key","test-key")
     def fake_request(self,installation_id,path,params=None):
-        if path=="/installation/repositories":return {"repositories":[{"id":991,"full_name":"cloudnova-test/site","private":True,"default_branch":"trunk"},{"id":992,"full_name":"cloudnova-test/public-site","private":False,"default_branch":"main"}]}
+        if path=="/installation/repositories":return {"repositories":[{"id":991,"full_name":"cloudnova-test/site","owner":{"login":"cloudnova-test"},"description":"Private app","private":True,"default_branch":"trunk"},{"id":992,"full_name":"cloudnova-test/public-site","owner":{"login":"cloudnova-test"},"description":"Public site","private":False,"default_branch":"main"}]}
         if path.endswith("/branches"):return [{"name":"trunk","protected":True},{"name":"preview","protected":False}]
         if path=="/repos/cloudnova-test/site":return {"default_branch":"trunk","private":True,"html_url":"https://github.com/cloudnova-test/site","description":"Site"}
+        if path=="/repos/cloudnova-test/site/contents":return [{"name":"package.json","path":"package.json","type":"file"}]
+        if path=="/repos/cloudnova-test/site/contents/package.json":return {"content":base64.b64encode(b'{"dependencies":{"react":"*","vite":"*"}}').decode()}
         raise AssertionError(path)
     monkeypatch.setattr("app.api.deployments.GitHubClient.request",fake_request)
     repos=client.get("/api/github/repositories",headers=headers);assert repos.status_code==200
@@ -63,12 +66,25 @@ def test_installation_repository_listing_and_branch_selection(client,monkeypatch
     listed=repos.json()["items"][0]
     assert listed["github_repo_id"]==991 and listed["name"]=="site"
     assert listed["full_name"]=="cloudnova-test/site" and listed["default_branch"]=="trunk"
+    assert listed["owner"]=="cloudnova-test" and listed["description"]=="Private app"
     assert listed["private"] is True and listed["visibility"]=="private"
     public=next(item for item in repos.json()["items"] if item["github_repo_id"]==992)
     assert public["name"]=="public-site" and public["private"] is False and public["visibility"]=="public"
     details=client.get(f"/api/github/repositories/{repository_id}",headers=headers);assert details.json()["default_branch"]=="trunk"
+    detected=client.get(f"/api/github/repositories/{repository_id}/detect",params={"branch":"trunk"},headers=headers)
+    assert detected.status_code==200 and detected.json()["framework"]=="React + Vite"
     branches=client.get(f"/api/github/repositories/{repository_id}/branches",headers=headers)
     assert [b["name"] for b in branches.json()["items"]]==["trunk","preview"]
+    monkeypatch.setattr("app.api.deployments.inspect_repository",lambda *args:{"framework":"React + Vite","install_command":"npm ci","build_command":"npm run build","output_directory":"dist","runtime_version":"20"})
+    imported=client.post("/api/projects",headers=headers,json={"repository_id":repository_id,"name":"CloudNova Site","branch":"trunk","root_directory":"frontend","framework":"React + Vite","install_command":"npm ci","build_command":"npm run build","output_directory":"dist","runtime_version":"20"})
+    assert imported.status_code==201
+    assert imported.json()["root_directory"]=="frontend" and imported.json()["framework"]=="React + Vite"
+    assert imported.json()["install_command"]=="npm ci" and imported.json()["output_directory"]=="dist"
+    project_id=imported.json()["id"]
+    saved=client.post(f"/api/projects/{project_id}/environment",headers=headers,json={"name":"BUILD_SECRET","value":"private-test-value"})
+    assert saved.status_code==201 and "value" not in saved.json()
+    listed=client.get(f"/api/projects/{project_id}/environment",headers=headers)
+    assert listed.json()["items"]==[{"id":saved.json()["id"],"name":"BUILD_SECRET","value_set":True}]
 
 def test_installation_repository_listing_fetches_all_pages(monkeypatch):
     from app.services.github import GitHubClient
