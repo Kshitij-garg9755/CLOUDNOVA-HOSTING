@@ -39,6 +39,16 @@ services:
         sync: false
       - key: PAYMENT_DEMO_MODE
         value: "true"
+      - key: UPI_GATEWAY_URL
+        sync: false
+      - key: UPI_GATEWAY_API_KEY
+        sync: false
+      - key: UPI_GATEWAY_API_SECRET
+        sync: false
+      - key: UPI_GATEWAY_RETURN_URL
+        value: https://cloudnova-hosting.netlify.app/payment/return
+      - key: UPI_GATEWAY_WEBHOOK_SECRET
+        sync: false
       - key: RAZORPAY_KEY_ID
         sync: false
       - key: RAZORPAY_KEY_SECRET

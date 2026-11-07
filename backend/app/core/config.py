@@ -12,6 +12,11 @@ class Settings(BaseSettings):
     razorpay_key_id: str = ""
     razorpay_key_secret: str = ""
     razorpay_webhook_secret: str = ""
+    upi_gateway_url: str = ""
+    upi_gateway_api_key: str = ""
+    upi_gateway_api_secret: str = ""
+    upi_gateway_return_url: str = ""
+    upi_gateway_webhook_secret: str = ""
     payment_demo_mode: bool = True
     github_app_id: str = ""
     github_app_slug: str = ""
@@ -40,6 +45,14 @@ class Settings(BaseSettings):
         if value.startswith("postgresql://"):
             return "postgresql+psycopg://" + value[len("postgresql://"):]
         return value
+
+    @property
+    def upi_gateway_configured(self) -> bool:
+        return all((self.upi_gateway_url, self.upi_gateway_api_key, self.upi_gateway_api_secret, self.upi_gateway_return_url))
+
+    @property
+    def upi_gateway_webhook_signing_secret(self) -> str:
+        return self.upi_gateway_webhook_secret or self.upi_gateway_api_secret
 
 settings = Settings()
 def origins() -> list[str]:

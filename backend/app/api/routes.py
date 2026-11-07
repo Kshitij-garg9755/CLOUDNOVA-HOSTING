@@ -1,5 +1,6 @@
-import hashlib,hmac,secrets
+import hashlib,hmac,json,secrets
 from datetime import datetime,timedelta,timezone
+from decimal import Decimal
 from fastapi import APIRouter,Depends,HTTPException,Request,Query
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
@@ -106,6 +107,98 @@ def create_order(data:OrderIn,db:Session=Depends(get_db),u:User=Depends(current_
     if not p or not p.active:raise HTTPException(404,"Plan not found")
     o=Order(user_id=u.id,plan_id=p.id,status="pending",amount=p.price_monthly);db.add(o);db.flush();db.add(OrderItem(order_id=o.id,description=p.name,quantity=1,unit_price=p.price_monthly));db.add(ActivityLog(user_id=u.id,action="order.created",description=f"Order for {p.name}"));db.commit();db.refresh(o);return order_dict(o,p.name)
 def order_dict(o,plan_name=None):return {"id":o.id,"user_id":o.user_id,"plan_id":o.plan_id,"plan_name":plan_name,"status":o.status,"amount":o.amount,"currency":o.currency,"created_at":o.created_at}
+
+def _fulfill_upi_order(order:Order,payment:Payment,remote:dict,db:Session)->bool:
+    if remote.get("client_order_id")!=order.id or not PaymentService.is_matching_paid_order(order,remote):return False
+    payment.status="paid";order.status="paid"
+    if not db.query(Invoice).filter_by(order_id=order.id).first():
+        db.add(Invoice(user_id=order.user_id,order_id=order.id,number="CN-"+order.id[:10].upper(),amount=order.amount))
+    if not db.query(Subscription).filter_by(user_id=order.user_id,plan_id=order.plan_id).filter(Subscription.created_at>=order.created_at).first():
+        db.add(Subscription(user_id=order.user_id,plan_id=order.plan_id,status="demo_pending",demo=True))
+    db.commit();return True
+
+@router.post("/payments/upi/create",status_code=201)
+def create_upi_checkout(data:dict,db:Session=Depends(get_db),u:User=Depends(current_user)):
+    if not settings.upi_gateway_configured:raise HTTPException(503,"UPI Gateway is not configured on the CloudNova backend")
+    checkout_id=str(data.get("checkout_id", ""))
+    try:
+        import uuid
+        checkout_id=str(uuid.UUID(checkout_id))
+    except (ValueError,AttributeError):raise HTTPException(422,"A valid checkout_id is required")
+    plan=db.get(HostingPlan,data.get("plan_id"))
+    if not plan or not plan.active:raise HTTPException(404,"Plan not found")
+    order=db.get(Order,checkout_id)
+    if order and (order.user_id!=u.id or order.plan_id!=plan.id):raise HTTPException(409,"Checkout reference is already in use")
+    if order and order.status!="pending":raise HTTPException(409,"This checkout is no longer payable")
+    if not order:
+        order=Order(id=checkout_id,user_id=u.id,plan_id=plan.id,status="pending",amount=plan.price_monthly,currency="INR")
+        db.add(order);db.flush()
+        db.add(OrderItem(order_id=order.id,description=plan.name,quantity=1,unit_price=plan.price_monthly))
+        db.add(ActivityLog(user_id=u.id,action="order.created",description=f"UPI checkout for {plan.name}"))
+        db.commit()
+    payment=db.query(Payment).filter_by(order_id=order.id).first()
+    try:
+        service=PaymentService()
+        remote=service.get_upi_gateway_order(payment.provider_id) if payment else service.create_upi_gateway_order(int((Decimal(str(order.amount))*100).quantize(Decimal("1"))),order.id,{"name":u.name,"email":u.email,"phone":u.phone})
+        expected=Decimal(str(order.amount)).quantize(Decimal("0.01"))
+        remote_amount=Decimal(str(remote.get("amount",-1))) if payment else (Decimal(str(remote.get("amount",-1)))/100)
+        if remote.get("currency")!="INR" or remote_amount.quantize(Decimal("0.01"))!=expected or (payment and remote.get("client_order_id")!=order.id) or (not payment and remote.get("mode")!="upi_gateway"):
+            raise HTTPException(502,"The UPI Gateway returned mismatched payment details")
+        payment_url=remote.get("payment_url")
+        if not payment_url:raise HTTPException(502,"The UPI Gateway did not return a checkout URL")
+        if not payment:
+            db.add(Payment(order_id=order.id,provider_id=remote["id"],status="created",amount=order.amount,currency="INR"))
+        elif remote.get("status")=="paid":
+            _fulfill_upi_order(order,payment,remote,db)
+        db.commit()
+        return {"order_id":order.id,"payment_url":payment_url,"amount":order.amount,"currency":"INR","status":"pending","mode":"upi_gateway"}
+    except HTTPException:
+        db.rollback();raise
+    except ValueError as exc:
+        db.rollback();raise HTTPException(503,str(exc))
+    except Exception:
+        db.rollback();raise
+
+@router.get("/payments/upi/{order_id}/status")
+def upi_checkout_status(order_id:str,db:Session=Depends(get_db),u:User=Depends(current_user)):
+    order=db.get(Order,order_id)
+    if not order or order.user_id!=u.id:raise HTTPException(404,"Order not found")
+    payment=db.query(Payment).filter_by(order_id=order.id).first()
+    if not payment or not payment.provider_id:raise HTTPException(404,"UPI payment not found")
+    if payment.status!="paid":
+        try:remote=PaymentService().get_upi_gateway_order(payment.provider_id)
+        except ValueError as exc:raise HTTPException(503,str(exc))
+        if remote.get("client_order_id")!=order.id:raise HTTPException(502,"The UPI Gateway returned an unrelated order")
+        if remote.get("status")=="paid" and not _fulfill_upi_order(order,payment,remote,db):
+            raise HTTPException(409,"The UPI Gateway payment details did not match this CloudNova order")
+        elif remote.get("status") in {"expired","failed"}:
+            payment.status=remote["status"];order.status=remote["status"];db.commit()
+        else:
+            payment.status="review" if remote.get("status")=="review" else "created";db.commit()
+    subscription=db.query(Subscription).filter_by(user_id=u.id,plan_id=order.plan_id).filter(Subscription.created_at>=order.created_at).first() if order.status=="paid" else None
+    return {"order_id":order.id,"status":order.status,"payment_status":payment.status,"provisioning_status":subscription.status if subscription else None,"demo_provisioning":subscription.demo if subscription else None}
+
+@router.post("/payments/upi/webhook")
+async def upi_gateway_webhook(request:Request,db:Session=Depends(get_db)):
+    secret=settings.upi_gateway_webhook_signing_secret
+    if not secret:raise HTTPException(503,"UPI Gateway webhook secret is not configured")
+    body=await request.body();signature=request.headers.get("x-signature","")
+    expected=hmac.new(secret.encode(),body,hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature,expected):raise HTTPException(400,"Invalid UPI Gateway webhook signature")
+    try:event=json.loads(body)
+    except (json.JSONDecodeError,UnicodeDecodeError):raise HTTPException(400,"Invalid webhook payload")
+    if event.get("event") not in {"order.paid","order.expired","order.under_review"}:return {"received":True,"ignored":True}
+    remote=event.get("data")
+    if not isinstance(remote,dict):raise HTTPException(400,"Invalid webhook order data")
+    order=db.get(Order,remote.get("client_order_id"));payment=db.query(Payment).filter_by(order_id=order.id).first() if order else None
+    if not order or not payment:return {"received":True,"ignored":True}
+    if event["event"]=="order.paid":
+        if not _fulfill_upi_order(order,payment,remote,db):raise HTTPException(409,"UPI Gateway payment details did not match the CloudNova order")
+    elif event["event"]=="order.expired" and payment.status!="paid":
+        payment.status="expired";order.status="expired";db.commit()
+    elif event["event"]=="order.under_review" and payment.status!="paid":
+        payment.status="review";db.commit()
+    return {"received":True}
 @router.get("/orders")
 def orders(db:Session=Depends(get_db),u:User=Depends(current_user),limit:int=Query(50,ge=1,le=100),offset:int=Query(0,ge=0)):
     q=db.query(Order).filter(Order.user_id==u.id);return {"items":[order_dict(o,db.get(HostingPlan,o.plan_id).name if o.plan_id and db.get(HostingPlan,o.plan_id) else None) for o in page(q.order_by(Order.created_at.desc()),limit,offset)],"total":q.count()}
@@ -150,7 +243,6 @@ async def payment_webhook(request:Request,db:Session=Depends(get_db)):
     if not settings.razorpay_webhook_secret:raise HTTPException(503,"Webhook secret is not configured")
     expected=hmac.new(settings.razorpay_webhook_secret.encode(),body,hashlib.sha256).hexdigest()
     if not hmac.compare_digest(signature,expected):raise HTTPException(400,"Invalid webhook signature")
-    import json
     event=json.loads(body);entity=event.get("payload",{}).get("payment",{}).get("entity",{});order_id=entity.get("order_id");payment_id=entity.get("id")
     pay=db.query(Payment).filter_by(provider_id=order_id).first()
     if pay and event.get("event")=="payment.captured" and pay.status!="paid":

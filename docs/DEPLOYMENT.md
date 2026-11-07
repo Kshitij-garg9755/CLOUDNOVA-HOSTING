@@ -34,6 +34,15 @@ Create a Blueprint from the repository root, or manually use those exact setting
 | `RAZORPAY_KEY_ID` | Optional Razorpay key ID. |
 | `RAZORPAY_KEY_SECRET` | Optional secret. |
 | `RAZORPAY_WEBHOOK_SECRET` | Optional webhook signing secret. |
+| `UPI_GATEWAY_URL` | HTTPS base URL of the publicly deployed UPI Gateway (server-to-server only). |
+| `UPI_GATEWAY_API_KEY` | Merchant API key shown in the UPI Gateway Settings page. |
+| `UPI_GATEWAY_API_SECRET` | Merchant API secret; store as a Render secret, never in Vite/frontend variables. |
+| `UPI_GATEWAY_RETURN_URL` | `https://cloudnova-hosting.netlify.app/payment/return` (use the actual frontend origin). |
+| `UPI_GATEWAY_WEBHOOK_SECRET` | Optional; defaults to the gateway merchant API secret. Must match the secret signing the gateway's `X-Signature` webhook. |
+
+CloudNova's API calls the UPI Gateway `POST /api/v1/orders` and `GET /api/v1/orders/{order_id}`. Set the gateway's merchant webhook URL to `https://cloudnova-api-qnzr.onrender.com/api/payments/upi/webhook` (or your current API host). The UPI Gateway and CloudNova API both need public HTTPS URLs in production; a localhost address is only valid for local development. The gateway must be configured with your merchant UPI account. Manual UPI verification remains manual: the merchant approves the customer's UTR in the gateway dashboard before CloudNova records the payment as paid.
+
+CloudNova currently uses a demo hosting provider. A confirmed payment creates a billing record, but it does not provision real hosting until a hosting provider is integrated.
 
 Do not put secrets in `render.yaml`, source control, or frontend variables. GitHub uses the exact existing variable `GITHUB_PRIVATE_KEY`; backend normalization accepts CRLF, escaped `\\n`, and already multiline values without logging the key.
 
